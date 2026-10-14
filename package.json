@@ -1,0 +1,17 @@
+{
+  "name": "mta-discord-gate",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Bot de Discord + API que valida que un jugador de MTA:SA esta vinculado a su Discord",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/api.test.js test/bot.test.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "discord.js": "^14.22.1",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0"
+  }
+}
