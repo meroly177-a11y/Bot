@@ -7,9 +7,9 @@ const SECRET = 'a'.repeat(40);
 const S1 = 'A1B2C3D4E5F60718293A4B5C6D7E8F90';
 const S2 = '0F1E2D3C4B5A69788796A5B4C3D2E1F0';
 
-function setup(allowed = () => true) {
+function setup(allowed = () => true, onVerified) {
   const store = { db: { links: {}, codes: {} }, save() {} };
-  const svc = createApi({ store, apiSecret: SECRET, isAllowedMember: async (id) => allowed(id) });
+  const svc = createApi({ store, apiSecret: SECRET, isAllowedMember: async (id) => allowed(id), onVerified });
   return new Promise((resolve) => {
     const server = svc.app.listen(0, '127.0.0.1', () => {
       const base = `http://127.0.0.1:${server.address().port}`;
@@ -98,32 +98,54 @@ test('entradas invalidas y JSON roto', async () => {
   t.close();
 });
 
-test('nombre del servidor: se guarda al vincular, se limpia y se sincroniza en verify', async () => {
+const tick = () => new Promise((r) => setImmediate(r));
+
+test('claim exitoso: guarda meta, llama onVerified una vez y el codigo no se reutiliza', async () => {
   const events = [];
-  const store = { db: { links: {}, codes: {}, meta: {} }, save() {} };
-  const svc = createApi({
-    store, apiSecret: SECRET, isAllowedMember: async () => true,
-    hooks: { onLinked: (p) => events.push(['linked', p]), onNameChanged: (p) => events.push(['name', p]) }
-  });
-  const server = await new Promise((r) => { const s = svc.app.listen(0, '127.0.0.1', () => r(s)); });
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const post = async (path, body) => (await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-MTA-Secret': SECRET }, body: JSON.stringify(body) })).json();
-
-  await post('/api/claim', { serial: S1, code: svc.createCode('111'), name: '#FF0000Juan_Perez' });
-  assert.equal(events[0][0], 'linked');
-  assert.equal(events[0][1].name, 'Juan_Perez');
-  assert.equal(events[0][1].count, 1);
-  assert.equal(svc.getInfo('111').name, 'Juan_Perez');
-  assert.equal(svc.getInfo('999'), null);
-
-  await post('/api/verify', { serial: S1, name: 'Juan_Perez' });          // mismo nombre: no dispara nada
+  const t = await setup(() => true, (e) => events.push(e));
+  const r = await t.post('/api/claim', { serial: S1.toLowerCase(), code: t.svc.createCode('111'), name: 'Juan_Perez', playerId: '12', account: 'juan' });
+  assert.equal(r.status, 200); await tick();
   assert.equal(events.length, 1);
-  await post('/api/verify', { serial: S1, name: 'Juan_Nuevo' });          // cambio de nombre
-  assert.deepEqual(events[1], ['name', { discordId: '111', name: 'Juan_Nuevo' }]);
-  assert.equal(svc.listLinked()[0].name, 'Juan_Nuevo');
+  assert.equal(events[0].discordId, '111'); assert.equal(events[0].serial, S1);
+  assert.equal(events[0].name, 'Juan_Perez'); assert.equal(events[0].playerId, '12'); assert.equal(events[0].account, 'juan');
+  assert.equal(events[0].repeat, false); assert.ok(events[0].linkedAt > 0);
+  assert.equal(t.store.db.meta['111'].name, 'Juan_Perez');
+  await t.post('/api/claim', { serial: S1, code: '000000' });         // invalido: sin evento
+  await tick(); assert.equal(events.length, 1);
+  assert.equal(t.svc.isLinked('111'), true);
+  t.svc.unlinkDiscord('111');
+  assert.equal(t.svc.isLinked('111'), false); assert.equal(t.store.db.meta['111'], undefined);
+  t.close();
+});
 
-  svc.unlinkDiscord('111');
-  assert.equal(svc.getInfo('111'), null);
-  assert.equal(store.db.meta['111'], undefined);
-  server.close();
+test('claim fallido (miembro ausente / ya vinculado) no dispara onVerified', async () => {
+  const events = [];
+  let allowed = false;
+  const t = await setup(() => allowed, (e) => events.push(e));
+  let r = await t.post('/api/claim', { serial: S1, code: t.svc.createCode('111') });
+  assert.equal(r.json.error, 'not_guild_member');
+  allowed = true;
+  await t.post('/api/claim', { serial: S1, code: t.svc.createCode('111') });
+  r = await t.post('/api/claim', { serial: S2, code: t.svc.createCode('111') });
+  assert.equal(r.status, 409); await tick();
+  assert.equal(events.length, 1);
+  t.close();
+});
+
+test('mismo serial + mismo Discord: repeat=true y conserva linkedAt; datos sucios se sanean', async () => {
+  const events = [];
+  const t = await setup(() => true, (e) => events.push(e));
+  await t.post('/api/claim', { serial: S1, code: t.svc.createCode('111'), name: 'A\nB', playerId: 'no valido!' });
+  await t.post('/api/claim', { serial: S1, code: t.svc.createCode('111'), name: 'Nuevo' });
+  await tick();
+  assert.equal(events[0].name, 'AB'); assert.equal(events[0].playerId, null);
+  assert.equal(events[1].repeat, true); assert.equal(events[1].linkedAt, events[0].linkedAt);
+  t.close();
+});
+
+test('un onVerified que falla no rompe la respuesta a MTA', async () => {
+  const t = await setup(() => true, () => { throw new Error('boom'); });
+  const r = await t.post('/api/claim', { serial: S1, code: t.svc.createCode('111') });
+  assert.equal(r.status, 200); assert.equal(r.json.ok, true);
+  t.close();
 });

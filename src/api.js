@@ -11,26 +11,23 @@ const normSerial = (s) => {
   const v = String(s || '').trim().toUpperCase();
   return /^[A-F0-9]{20,64}$/.test(v) ? v : null;
 };
-
-// Quita codigos de color de MTA (#RRGGBB) y caracteres de control; maximo 32 (limite de apodo en Discord).
-const cleanName = (n) => {
-  const v = String(n ?? '').replace(/#[0-9a-fA-F]{6}/g, '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 32);
-  return v || null;
-};
+// Datos informativos que manda el resource de MTA (solo se usan en los logs). Se sanean y se limitan.
+const cleanText = (s, max) => String(s ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, max);
+const cleanName = (s) => cleanText(s, 64) || null;
+const cleanPlayerId = (s) => { const v = cleanText(s, 16); return /^[\w.-]{1,16}$/.test(v) ? v : null; };
 
 /**
  * store: { db, save }          -> persistencia
  * apiSecret: string            -> secreto compartido con el resource de MTA
  * isAllowedMember(userId)      -> Promise<boolean> (miembro del servidor y, si aplica, con el rol)
- * hooks: { onLinked({discordId,name,count}), onNameChanged({discordId,name}) }  (se asignan despues de crear el bot)
+ * onVerified(evt)              -> (opcional) se llama UNA vez por cada vinculacion confirmada por MTA:
+ *                                 { discordId, serial, name, account, playerId, linkedAt, repeat }
+ *                                 (tambien se puede fijar despues con setOnVerified)
  */
-function createApi({ store, apiSecret, isAllowedMember, hooks = {}, now = Date.now }) {
+function createApi({ store, apiSecret, isAllowedMember, onVerified: onVerifiedInit, now = Date.now }) {
   const { db, save } = store;
   db.meta = db.meta || {};
-  const fire = (name, payload) => {
-    try { Promise.resolve(hooks[name]?.(payload)).catch((e) => console.error(`[hook ${name}]`, e.message)); }
-    catch (e) { console.error(`[hook ${name}]`, e.message); }
-  };
+  let onVerified = typeof onVerifiedInit === 'function' ? onVerifiedInit : null;
   const fails = new Map(); // serial -> { count, reset }
 
   const isBlocked = (serial) => {
@@ -51,6 +48,10 @@ function createApi({ store, apiSecret, isAllowedMember, hooks = {}, now = Date.n
     for (const [h, c] of Object.entries(db.codes)) if (c.expiresAt < t) delete db.codes[h];
   };
   const serialOfDiscord = (discordId) => Object.keys(db.links).find((s) => db.links[s] === discordId);
+  const notifyVerified = (evt) => {
+    if (!onVerified) return;
+    Promise.resolve().then(() => onVerified(evt)).catch((e) => console.error('[verified] handler:', e.message || e));
+  };
 
   // ---- operaciones que usa el bot de Discord ----
   function createCode(discordId) {
@@ -70,16 +71,8 @@ function createApi({ store, apiSecret, isAllowedMember, hooks = {}, now = Date.n
     save();
     return n;
   }
-  function getInfo(discordId) {
-    const serial = serialOfDiscord(discordId);
-    if (!serial) return null;
-    const m = db.meta[discordId] || {};
-    return { serial, name: m.name || null, linkedAt: m.linkedAt || null };
-  }
-  function listLinked() {
-    const rows = Object.values(db.links).map((id) => ({ discordId: id, name: db.meta[id]?.name || null, linkedAt: db.meta[id]?.linkedAt || 0 }));
-    return rows.sort((a, b) => b.linkedAt - a.linkedAt);
-  }
+  const isLinked = (discordId) => Boolean(serialOfDiscord(discordId));
+  const setOnVerified = (fn) => { onVerified = typeof fn === 'function' ? fn : null; };
 
   // ---- API HTTP para el resource de MTA ----
   const app = express();
@@ -106,14 +99,6 @@ function createApi({ store, apiSecret, isAllowedMember, hooks = {}, now = Date.n
     try { allowed = await isAllowedMember(discordId); }
     catch (e) { console.error('[verify] Discord:', e.message); return res.status(503).json({ ok: false, error: 'discord_unavailable' }); }
     if (!allowed) return res.status(403).json({ ok: false, error: 'not_guild_member' });
-    // Mantiene sincronizado el nombre que el jugador usa en el servidor de MTA.
-    const name = cleanName(req.body?.name);
-    const meta = db.meta[discordId];
-    if (name && (!meta || meta.name !== name)) {
-      db.meta[discordId] = { serial, linkedAt: meta?.linkedAt || now(), ...meta, name };
-      save();
-      fire('onNameChanged', { discordId, name });
-    }
     res.json({ ok: true, discordId });
   });
 
@@ -138,19 +123,25 @@ function createApi({ store, apiSecret, isAllowedMember, hooks = {}, now = Date.n
     const serialTaken = db.links[serial] && db.links[serial] !== item.discordId;
     if ((otherSerial && otherSerial !== serial) || serialTaken) return res.status(409).json({ ok: false, error: 'already_linked' });
 
-    const name = cleanName(req.body?.name);
+    const repeat = db.links[serial] === item.discordId; // mismo serial + mismo Discord: no es una vinculacion nueva
+    const prev = db.meta[item.discordId];
     delete db.codes[h];
     db.links[serial] = item.discordId;
-    db.meta[item.discordId] = { serial, name, linkedAt: now() };
+    db.meta[item.discordId] = {
+      name: cleanName(req.body?.name),
+      account: cleanName(req.body?.account),
+      playerId: cleanPlayerId(req.body?.playerId),
+      linkedAt: repeat && prev?.linkedAt ? prev.linkedAt : now()
+    };
     save();
     res.json({ ok: true, discordId: item.discordId });
-    fire('onLinked', { discordId: item.discordId, name, count: Object.keys(db.links).length });
+    notifyVerified({ discordId: item.discordId, serial, ...db.meta[item.discordId], repeat });
   });
 
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => res.status(400).json({ ok: false, error: 'invalid_input' }));
 
-  return { app, createCode, unlinkDiscord, getInfo, listLinked };
+  return { app, createCode, unlinkDiscord, isLinked, setOnVerified };
 }
 
 module.exports = { createApi };
