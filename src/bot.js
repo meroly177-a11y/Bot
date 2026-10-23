@@ -1,3 +1,4 @@
+
 'use strict';
 
 const {
@@ -19,10 +20,6 @@ const {
 const EPHEMERAL = {
   flags: MessageFlags.Ephemeral
 };
-
-// ======================================================
-// COMANDOS DE NOVARA
-// ======================================================
 
 function buildCommands() {
   return [
@@ -57,10 +54,6 @@ function buildCommands() {
     .concat(buildVerificationCommands());
 }
 
-// ======================================================
-// INICIAR BOT
-// ======================================================
-
 async function startBot({
   token,
   clientId,
@@ -70,31 +63,23 @@ async function startBot({
 }) {
   console.log('[NOVARA] Preparando el bot...');
 
-  // Crear cliente de Discord.
   const client = new Client({
-    intents: [
-      GatewayIntentBits.Guilds
-    ]
+    intents: [GatewayIntentBits.Guilds]
   });
 
-  // Confirmar conexión.
   client.once(Events.ClientReady, (connectedClient) => {
     console.log(
       `[NOVARA] Discord conectado como ${connectedClient.user.tag}`
     );
   });
 
-  // Registrar errores del cliente.
   client.on('error', (error) => {
-    console.error(
-      '[NOVARA] Error del cliente Discord:',
-      error
-    );
+    console.error('[NOVARA] Error del cliente Discord:', error);
   });
 
-  // ====================================================
-  // SISTEMA DE VERIFICACIÓN
-  // ====================================================
+  client.on('shardError', (error) => {
+    console.error('[NOVARA] Error de conexión de Discord:', error);
+  });
 
   const verification = createVerification({
     client,
@@ -104,21 +89,12 @@ async function startBot({
   });
 
   service.setOnVerified(verification.onVerified);
-
   verification.registerCleanup();
 
   console.log('[NOVARA] Sistema de verificación preparado.');
 
-  // ====================================================
-  // MANEJADOR DE INTERACCIONES
-  // ====================================================
-
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
-      // -----------------------------------------------
-      // BOTONES
-      // -----------------------------------------------
-
       if (interaction.isButton()) {
         if (interaction.guildId !== guildId) {
           if (!interaction.replied && !interaction.deferred) {
@@ -127,55 +103,29 @@ async function startBot({
               ...EPHEMERAL
             });
           }
-
           return;
         }
 
         await verification.handleInteraction(interaction);
-
         return;
       }
 
-      // Ignorar interacciones que no sean comandos.
-      if (!interaction.isChatInputCommand()) {
-        return;
-      }
-
-      // -----------------------------------------------
-      // VALIDAR SERVIDOR
-      // -----------------------------------------------
+      if (!interaction.isChatInputCommand()) return;
 
       if (interaction.guildId !== guildId) {
-        if (!interaction.replied && !interaction.deferred) {
-          await interaction.reply({
-            content: 'Usa este comando dentro del Discord oficial.',
-            ...EPHEMERAL
-          });
-        }
-
+        await interaction.reply({
+          content: 'Usa este comando dentro del Discord oficial.',
+          ...EPHEMERAL
+        });
         return;
       }
 
-      // -----------------------------------------------
-      // COMANDOS DE VERIFICACIÓN Y ADMINISTRACIÓN
-      // -----------------------------------------------
-
-      const handled = await verification.handleInteraction(
-        interaction
-      );
-
-      if (handled) {
+      if (await verification.handleInteraction(interaction)) {
         return;
       }
-
-      // -----------------------------------------------
-      // /VINCULAR
-      // -----------------------------------------------
 
       if (interaction.commandName === 'vincular') {
-        const code = service.createCode(
-          interaction.user.id
-        );
+        const code = service.createCode(interaction.user.id);
 
         await interaction.reply({
           content:
@@ -184,18 +134,11 @@ async function startBot({
             'Caduca en 5 minutos. No lo compartas.',
           ...EPHEMERAL
         });
-
         return;
       }
 
-      // -----------------------------------------------
-      // /DESVINCULAR
-      // -----------------------------------------------
-
       if (interaction.commandName === 'desvincular') {
-        const result = service.unlinkDiscord(
-          interaction.user.id
-        );
+        const result = service.unlinkDiscord(interaction.user.id);
 
         await interaction.reply({
           content: result
@@ -203,37 +146,22 @@ async function startBot({
             : 'No tenias ninguna vinculacion.',
           ...EPHEMERAL
         });
-
         return;
       }
 
-      // -----------------------------------------------
-      // /ADMIN-DESVINCULAR
-      // -----------------------------------------------
-
       if (interaction.commandName === 'admin-desvincular') {
-        const isAdministrator =
-          interaction.memberPermissions?.has(
-            PermissionFlagsBits.Administrator
-          );
-
-        if (!isAdministrator) {
+        if (!interaction.memberPermissions?.has(
+          PermissionFlagsBits.Administrator
+        )) {
           await interaction.reply({
             content: 'No tienes permiso.',
             ...EPHEMERAL
           });
-
           return;
         }
 
-        const target = interaction.options.getUser(
-          'usuario',
-          true
-        );
-
-        const result = service.unlinkDiscord(
-          target.id
-        );
+        const target = interaction.options.getUser('usuario', true);
+        const result = service.unlinkDiscord(target.id);
 
         await interaction.reply({
           content: result
@@ -241,40 +169,24 @@ async function startBot({
             : `<@${target.id}> no tenia vinculacion.`,
           ...EPHEMERAL
         });
-
-        return;
       }
-
-      // -----------------------------------------------
-      // COMANDO DESCONOCIDO
-      // -----------------------------------------------
-
-      if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({
-          content: 'No reconozco ese comando.',
-          ...EPHEMERAL
-        });
-      }
-
     } catch (error) {
       console.error(
-        `[NOVARA] Error en el comando ${interaction.commandName || interaction.customId || 'desconocido'}:`,
+        `[NOVARA] Error en interacción ${interaction.commandName || interaction.customId || 'desconocida'}:`,
         error
       );
 
-      // Intentar responder sin duplicar la respuesta.
       if (
         interaction.isRepliable() &&
         !interaction.replied &&
         !interaction.deferred
       ) {
         await interaction.reply({
-          content:
-            'Ocurrio un error al ejecutar el comando. Intenta de nuevo.',
+          content: 'Ocurrio un error al ejecutar el comando. Intenta de nuevo.',
           ...EPHEMERAL
         }).catch((replyError) => {
           console.error(
-            '[NOVARA] No se pudo responder a la interacción:',
+            '[NOVARA] No se pudo responder:',
             replyError.message
           );
         });
@@ -282,19 +194,35 @@ async function startBot({
     }
   });
 
-  // ====================================================
-  // CONECTAR CON DISCORD
-  // ====================================================
-
   console.log('[NOVARA] Conectando con Discord...');
 
-  await client.login(token);
+  let loginTimeout;
 
-  console.log('[NOVARA] Inicio de sesión completado.');
+  try {
+    await Promise.race([
+      client.login(token),
+      new Promise((_, reject) => {
+        loginTimeout = setTimeout(() => {
+          reject(
+            new Error(
+              'Discord no completo el inicio de sesion en 15 segundos.'
+            )
+          );
+        }, 15000);
+      })
+    ]);
 
-  // ====================================================
-  // REGISTRAR COMANDOS
-  // ====================================================
+    console.log('[NOVARA] Inicio de sesión completado.');
+  } catch (error) {
+    console.error('[NOVARA] Falló el inicio de sesión:', error);
+
+    // Cerrar el cliente si el inicio de sesión falla.
+    client.destroy();
+
+    throw error;
+  } finally {
+    clearTimeout(loginTimeout);
+  }
 
   const rest = new REST({
     version: '10'
@@ -302,33 +230,22 @@ async function startBot({
 
   console.log('[NOVARA] Registrando comandos...');
 
+  // Registrar comandos en segundo plano sin bloquear el inicio.
   rest.put(
-    Routes.applicationGuildCommands(
-      clientId,
-      guildId
-    ),
+    Routes.applicationGuildCommands(clientId, guildId),
     {
       body: buildCommands()
     }
   ).then(() => {
-    console.log(
-      '[NOVARA] Comandos registrados correctamente.'
-    );
+    console.log('[NOVARA] Comandos registrados correctamente.');
   }).catch((error) => {
-    console.error(
-      '[NOVARA] Error al registrar los comandos:',
-      error
-    );
+    console.error('[NOVARA] Error al registrar los comandos:', error);
   });
 
   console.log('[NOVARA] Inicialización completada.');
 
   return client;
 }
-
-// ======================================================
-// COMPROBAR SI UN USUARIO PERTENECE AL SERVIDOR
-// ======================================================
 
 function makeMemberCheck({
   token,
@@ -368,10 +285,6 @@ function makeMemberCheck({
     );
   };
 }
-
-// ======================================================
-// EXPORTAR FUNCIONES
-// ======================================================
 
 module.exports = {
   startBot,
