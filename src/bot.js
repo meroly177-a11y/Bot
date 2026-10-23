@@ -1,87 +1,379 @@
 'use strict';
-const {
-  Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder,
-  PermissionFlagsBits, MessageFlags
-} = require('discord.js');
-const { createVerification, buildVerificationCommands } = require('./verification');
 
-const EPHEMERAL = { flags: MessageFlags.Ephemeral };
+const {
+  Client,
+  GatewayIntentBits,
+  Events,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+  MessageFlags
+} = require('discord.js');
+
+const {
+  createVerification,
+  buildVerificationCommands
+} = require('./verification');
+
+const EPHEMERAL = {
+  flags: MessageFlags.Ephemeral
+};
+
+// ======================================================
+// COMANDOS DE NOVARA
+// ======================================================
 
 function buildCommands() {
   return [
-    new SlashCommandBuilder().setName('vincular').setDescription('Genera un codigo para vincular tu Discord con tu cuenta de MTA'),
-    new SlashCommandBuilder().setName('desvincular').setDescription('Quita la vinculacion de tu Discord (por ejemplo, si cambiaste de PC)'),
+    new SlashCommandBuilder()
+      .setName('vincular')
+      .setDescription(
+        'Genera un codigo para vincular tu Discord con tu cuenta de MTA'
+      ),
+
+    new SlashCommandBuilder()
+      .setName('desvincular')
+      .setDescription(
+        'Quita la vinculacion de tu Discord'
+      ),
+
     new SlashCommandBuilder()
       .setName('admin-desvincular')
-      .setDescription('Admin: quita la vinculacion de un usuario')
-      .addUserOption((o) => o.setName('usuario').setDescription('Usuario a desvincular').setRequired(true))
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-  ].map((c) => c.toJSON()).concat(buildVerificationCommands());
+      .setDescription(
+        'Admin: quita la vinculacion de un usuario'
+      )
+      .addUserOption((option) =>
+        option
+          .setName('usuario')
+          .setDescription('Usuario a desvincular')
+          .setRequired(true)
+      )
+      .setDefaultMemberPermissions(
+        PermissionFlagsBits.Administrator
+      )
+  ]
+    .map((command) => command.toJSON())
+    .concat(buildVerificationCommands());
 }
 
-async function startBot({ token, clientId, guildId, service, store }) {
-  const rest = new REST({ version: '10' }).setToken(token);
-  await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: buildCommands() });
+// ======================================================
+// INICIAR BOT
+// ======================================================
 
-  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-  client.once(Events.ClientReady, (c) => console.log(`Bot de Discord conectado como ${c.user.tag}`));
+async function startBot({
+  token,
+  clientId,
+  guildId,
+  service,
+  store
+}) {
+  console.log('[NOVARA] Preparando el bot...');
 
-  // Verificacion MTA + Discord: /set log, /set rol, /admin-panel, boton Verificar, rol automatico y logs.
-  const verification = createVerification({ client, guildId, store, service });
+  // Crear cliente de Discord.
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds
+    ]
+  });
+
+  // Confirmar conexión.
+  client.once(Events.ClientReady, (connectedClient) => {
+    console.log(
+      `[NOVARA] Discord conectado como ${connectedClient.user.tag}`
+    );
+  });
+
+  // Registrar errores del cliente.
+  client.on('error', (error) => {
+    console.error(
+      '[NOVARA] Error del cliente Discord:',
+      error
+    );
+  });
+
+  // ====================================================
+  // SISTEMA DE VERIFICACIÓN
+  // ====================================================
+
+  const verification = createVerification({
+    client,
+    guildId,
+    store,
+    service
+  });
+
   service.setOnVerified(verification.onVerified);
+
   verification.registerCleanup();
 
-  client.on(Events.InteractionCreate, async (i) => {
+  console.log('[NOVARA] Sistema de verificación preparado.');
+
+  // ====================================================
+  // MANEJADOR DE INTERACCIONES
+  // ====================================================
+
+  client.on(Events.InteractionCreate, async (interaction) => {
     try {
-      if (i.isButton()) {
-        if (i.guildId !== guildId) return i.reply({ content: 'Usa este boton dentro del Discord oficial.', ...EPHEMERAL });
-        await verification.handleInteraction(i);
+      // -----------------------------------------------
+      // BOTONES
+      // -----------------------------------------------
+
+      if (interaction.isButton()) {
+        if (interaction.guildId !== guildId) {
+          if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({
+              content: 'Usa este boton dentro del Discord oficial.',
+              ...EPHEMERAL
+            });
+          }
+
+          return;
+        }
+
+        await verification.handleInteraction(interaction);
+
         return;
       }
-      if (!i.isChatInputCommand()) return;
-      if (i.guildId !== guildId) return i.reply({ content: 'Usa este comando dentro del Discord oficial.', ...EPHEMERAL });
-      if (await verification.handleInteraction(i)) return;
 
-      if (i.commandName === 'vincular') {
-        const code = service.createCode(i.user.id);
-        return i.reply({
-          content: `Tu codigo es: **${code}**\nEntra a MTA y escribe: **/vincular ${code}**\nCaduca en 5 minutos. No lo compartas.`,
+      // Ignorar interacciones que no sean comandos.
+      if (!interaction.isChatInputCommand()) {
+        return;
+      }
+
+      // -----------------------------------------------
+      // VALIDAR SERVIDOR
+      // -----------------------------------------------
+
+      if (interaction.guildId !== guildId) {
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({
+            content: 'Usa este comando dentro del Discord oficial.',
+            ...EPHEMERAL
+          });
+        }
+
+        return;
+      }
+
+      // -----------------------------------------------
+      // COMANDOS DE VERIFICACIÓN Y ADMINISTRACIÓN
+      // -----------------------------------------------
+
+      const handled = await verification.handleInteraction(
+        interaction
+      );
+
+      if (handled) {
+        return;
+      }
+
+      // -----------------------------------------------
+      // /VINCULAR
+      // -----------------------------------------------
+
+      if (interaction.commandName === 'vincular') {
+        const code = service.createCode(
+          interaction.user.id
+        );
+
+        await interaction.reply({
+          content:
+            `Tu codigo es: **${code}**\n` +
+            `Entra a MTA y escribe: **/vincular ${code}**\n` +
+            'Caduca en 5 minutos. No lo compartas.',
+          ...EPHEMERAL
+        });
+
+        return;
+      }
+
+      // -----------------------------------------------
+      // /DESVINCULAR
+      // -----------------------------------------------
+
+      if (interaction.commandName === 'desvincular') {
+        const result = service.unlinkDiscord(
+          interaction.user.id
+        );
+
+        await interaction.reply({
+          content: result
+            ? 'Listo, tu Discord ya no esta vinculado. Usa /vincular para vincularlo de nuevo.'
+            : 'No tenias ninguna vinculacion.',
+          ...EPHEMERAL
+        });
+
+        return;
+      }
+
+      // -----------------------------------------------
+      // /ADMIN-DESVINCULAR
+      // -----------------------------------------------
+
+      if (interaction.commandName === 'admin-desvincular') {
+        const isAdministrator =
+          interaction.memberPermissions?.has(
+            PermissionFlagsBits.Administrator
+          );
+
+        if (!isAdministrator) {
+          await interaction.reply({
+            content: 'No tienes permiso.',
+            ...EPHEMERAL
+          });
+
+          return;
+        }
+
+        const target = interaction.options.getUser(
+          'usuario',
+          true
+        );
+
+        const result = service.unlinkDiscord(
+          target.id
+        );
+
+        await interaction.reply({
+          content: result
+            ? `Vinculacion de <@${target.id}> eliminada.`
+            : `<@${target.id}> no tenia vinculacion.`,
+          ...EPHEMERAL
+        });
+
+        return;
+      }
+
+      // -----------------------------------------------
+      // COMANDO DESCONOCIDO
+      // -----------------------------------------------
+
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: 'No reconozco ese comando.',
           ...EPHEMERAL
         });
       }
-      if (i.commandName === 'desvincular') {
-        const n = service.unlinkDiscord(i.user.id);
-        return i.reply({ content: n ? 'Listo, tu Discord ya no esta vinculado. Usa /vincular para vincularlo de nuevo.' : 'No tenias ninguna vinculacion.', ...EPHEMERAL });
+
+    } catch (error) {
+      console.error(
+        `[NOVARA] Error en el comando ${interaction.commandName || interaction.customId || 'desconocido'}:`,
+        error
+      );
+
+      // Intentar responder sin duplicar la respuesta.
+      if (
+        interaction.isRepliable() &&
+        !interaction.replied &&
+        !interaction.deferred
+      ) {
+        await interaction.reply({
+          content:
+            'Ocurrio un error al ejecutar el comando. Intenta de nuevo.',
+          ...EPHEMERAL
+        }).catch((replyError) => {
+          console.error(
+            '[NOVARA] No se pudo responder a la interacción:',
+            replyError.message
+          );
+        });
       }
-      if (i.commandName === 'admin-desvincular') {
-        if (!i.memberPermissions?.has(PermissionFlagsBits.Administrator)) return i.reply({ content: 'No tienes permiso.', ...EPHEMERAL });
-        const target = i.options.getUser('usuario', true);
-        const n = service.unlinkDiscord(target.id);
-        return i.reply({ content: n ? `Vinculacion de <@${target.id}> eliminada.` : `<@${target.id}> no tenia vinculacion.`, ...EPHEMERAL });
-      }
-    } catch (e) {
-      console.error('Error en interaccion:', e);
-      if (i.isRepliable() && !i.replied && !i.deferred) i.reply({ content: 'Ocurrio un error. Intenta de nuevo.', ...EPHEMERAL }).catch(() => {});
     }
   });
 
+  // ====================================================
+  // CONECTAR CON DISCORD
+  // ====================================================
+
+  console.log('[NOVARA] Conectando con Discord...');
+
   await client.login(token);
+
+  console.log('[NOVARA] Inicio de sesión completado.');
+
+  // ====================================================
+  // REGISTRAR COMANDOS
+  // ====================================================
+
+  const rest = new REST({
+    version: '10'
+  }).setToken(token);
+
+  console.log('[NOVARA] Registrando comandos...');
+
+  rest.put(
+    Routes.applicationGuildCommands(
+      clientId,
+      guildId
+    ),
+    {
+      body: buildCommands()
+    }
+  ).then(() => {
+    console.log(
+      '[NOVARA] Comandos registrados correctamente.'
+    );
+  }).catch((error) => {
+    console.error(
+      '[NOVARA] Error al registrar los comandos:',
+      error
+    );
+  });
+
+  console.log('[NOVARA] Inicialización completada.');
+
   return client;
 }
 
-// Comprueba contra la API de Discord si el usuario esta en el servidor (y tiene el rol, si se exige).
-function makeMemberCheck({ token, guildId, requiredRoleId }) {
+// ======================================================
+// COMPROBAR SI UN USUARIO PERTENECE AL SERVIDOR
+// ======================================================
+
+function makeMemberCheck({
+  token,
+  guildId,
+  requiredRoleId
+}) {
   return async function isAllowedMember(userId) {
-    const r = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/${userId}`, {
-      headers: { Authorization: `Bot ${token}` },
-      signal: AbortSignal.timeout(8000)
-    });
-    if (r.status === 404) return false;
-    if (!r.ok) throw new Error(`Discord API respondio ${r.status}`);
-    if (!requiredRoleId) return true;
-    const member = await r.json();
-    return Array.isArray(member.roles) && member.roles.includes(requiredRoleId);
+    const response = await fetch(
+      `https://discord.com/api/v10/guilds/${guildId}/members/${userId}`,
+      {
+        headers: {
+          Authorization: `Bot ${token}`
+        },
+        signal: AbortSignal.timeout(8000)
+      }
+    );
+
+    if (response.status === 404) {
+      return false;
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        `Discord API respondio ${response.status}`
+      );
+    }
+
+    if (!requiredRoleId) {
+      return true;
+    }
+
+    const member = await response.json();
+
+    return (
+      Array.isArray(member.roles) &&
+      member.roles.includes(requiredRoleId)
+    );
   };
 }
 
-module.exports = { startBot, makeMemberCheck };
+// ======================================================
+// EXPORTAR FUNCIONES
+// ======================================================
+
+module.exports = {
+  startBot,
+  makeMemberCheck
+};
